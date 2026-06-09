@@ -64,7 +64,7 @@ def parse_message(text):
     for pattern in [
         r'#\s*(베리시[^\n*@<(]+?)(?:\s*출고|$|\n)',
         r'#\s*([^\n*@<(]+?)\s*출고요청',
-        r'#\s*([^\n*@<(]+?)\s*출고',
+        r'#\s*([^\n*@<(]+?)\s*출고요청드립니다',
     ]:
         match = re.search(pattern, clean_text)
         if match:
