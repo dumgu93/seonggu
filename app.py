@@ -7,8 +7,8 @@ from datetime import datetime
 app = Flask(__name__)
 
 SLACK_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
-CANVAS_ID = os.environ.get("CANVAS_ID")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
+CALENDAR_CHANNEL_ID = "C0B92726KKM"
 
 slack_client = WebClient(token=SLACK_TOKEN)
 processed_events = set()
@@ -16,51 +16,62 @@ processed_events = set()
 def parse_message(text):
     result = {}
 
+    # 멘션 제거
+    clean_text = re.sub(r'<@[A-Z0-9]+\|[^>]+>', '', text)
+    clean_text = re.sub(r'<!subteam\^[^>]+>', '', clean_text)
+    clean_text = re.sub(r'<http[^>]+>', '', clean_text)
+
     # 오더번호 추출
-    order_pattern = r'26\d{4}_[A-Za-z가-힣]+_[A-Za-z가-힣0-9]+'
-    orders = re.findall(order_pattern, text)
+    order_pattern = r'26\d{4}_[A-Za-z가-힣]+_[A-Za-z가-힣0-9()]+(?:\([^)]+\))?'
+    orders = re.findall(order_pattern, clean_text)
     result['order_number'] = ' / '.join(orders) if orders else '-'
 
-    # 출고일 추출
+    # 날짜 추출 - 6/13 형식 우선
     date_str = None
     patterns = [
+        (r'6/(\d{1,2})', 'slash6'),
+        (r'(\d{1,2})월\s*/?\s*(\d{1,2})', 'md'),
         (r'(\d{4})[.\-](\d{1,2})[.\-](\d{1,2})', 'ymd'),
-        (r'(\d{2})\.(\d{2})\.(\d{2})', 'ymd2'),
-        (r'(\d{1,2})월\s*(\d{1,2})일', 'md'),
-        (r'6\/(\d{1,2})', 'slash'),
     ]
     for pattern, ptype in patterns:
-        match = re.search(pattern, text)
+        match = re.search(pattern, clean_text)
         if match:
             g = match.groups()
-            if ptype == 'ymd':
-                date_str = f"{g[0]}-{g[1].zfill(2)}-{g[2].zfill(2)}"
-            elif ptype == 'ymd2':
-                date_str = f"20{g[0]}-{g[1].zfill(2)}-{g[2].zfill(2)}"
+            if ptype == 'slash6':
+                date_str = f"2026-06-{g[0].zfill(2)}"
             elif ptype == 'md':
                 date_str = f"2026-{g[0].zfill(2)}-{g[1].zfill(2)}"
-            elif ptype == 'slash':
-                date_str = f"2026-06-{g[0].zfill(2)}"
+            elif ptype == 'ymd':
+                date_str = f"{g[0]}-{g[1].zfill(2)}-{g[2].zfill(2)}"
             break
     result['date'] = date_str
 
     # 수량 추출
     qty_pattern = r'(\d{1,3}(?:,\d{3})*|\d+)\s*[Ee][Aa]'
-    quantities = re.findall(qty_pattern, text)
+    quantities = re.findall(qty_pattern, clean_text)
     result['quantity'] = '+'.join(quantities) + 'EA' if quantities else '-'
 
     # 브랜드/건명 추출
     brand = '-'
-    for pattern in [r'#\s*([^\n*]+?)\s*(?:출고|픽업|납품)', r'\*#([^\n*]+?)\*']:
-        match = re.search(pattern, text)
+    for pattern in [
+        r'#\s*(베리시[^\n*@<(]+?)(?:\s*출고|$|\n)',
+        r'#\s*([^\n*@<(]+?)\s*출고요청',
+        r'#\s*([^\n*@<(]+?)\s*출고',
+    ]:
+        match = re.search(pattern, clean_text)
         if match:
             brand = match.group(1).strip()
             break
     result['brand'] = brand
 
     # 도착시간 추출
-    time_match = re.search(r'(?:오전|오후)\s*(\d{1,2}시)', text)
-    result['arrival_time'] = time_match.group(0) if time_match else '-'
+    time_match = re.search(r'(?:오전|오후)\s*(\d{1,2}시(?:\s*\d{1,2}분)?)', clean_text)
+    if time_match:
+        result['arrival_time'] = time_match.group(0)
+    elif '추후' in clean_text:
+        result['arrival_time'] = '추후 업데이트'
+    else:
+        result['arrival_time'] = '-'
 
     return result
 
@@ -71,31 +82,31 @@ def get_weekday(date_str):
     except:
         return ""
 
-def update_canvas(parsed):
+def post_to_calendar(parsed):
     date = parsed.get('date')
     if not date:
         print("날짜 파싱 실패")
         return
 
     weekday = get_weekday(date)
-    section_title = f"📦 {date} {weekday}"
-    new_content = f"## {section_title}\n\n| 브랜드 / 건명 | 수량 | 도착시간 | 오더번호 |\n|---|---|---|---|\n|{parsed['brand']}|{parsed['quantity']}|{parsed['arrival_time']}|{parsed['order_number']}|\n\n---\n"
+
+    message = f"""*📦 {date} {weekday} 출고 요청*
+
+*브랜드/건명:* {parsed['brand']}
+*수량:* {parsed['quantity']}
+*도착시간:* {parsed['arrival_time']}
+*오더번호:* {parsed['order_number']}
+"""
 
     try:
-        slack_client.canvases_edit(
-            canvas_id=CANVAS_ID,
-            changes=[{
-                "operation": "insert_after",
-                "section_id": "temp:C:EWA55e1ed3e48cd2e0a71a9eb1a2",
-                "document_content": {
-                    "type": "markdown",
-                    "markdown": new_content
-                }
-            }]
+        slack_client.chat_postMessage(
+            channel=CALENDAR_CHANNEL_ID,
+            text=message
         )
-        print(f"Canvas 업데이트 성공: {section_title}")
+        print(f"캘린더 채널 포스팅 성공: {date}")
     except Exception as e:
-        print(f"Canvas 업데이트 오류: {e}")
+        print(f"포스팅 오류: {e}")
+
 @app.route("/slack/events", methods=["POST"])
 def slack_events():
     data = request.json
@@ -113,12 +124,12 @@ def slack_events():
     if event.get("type") == "message" and not event.get("subtype"):
         channel = event.get("channel")
         text = event.get("text", "")
-        print(f"메시지 수신: channel={channel}, text={text[:50]}")
+        print(f"메시지 수신: channel={channel}, text={text[:80]}")
 
         if channel == CHANNEL_ID and "출고" in text:
             parsed = parse_message(text)
             print(f"파싱 결과: {parsed}")
-            update_canvas(parsed)
+            post_to_calendar(parsed)
 
     return "OK"
 
