@@ -78,11 +78,11 @@ def update_canvas(parsed):
         return
 
     weekday = get_weekday(date)
-    section_title = f"📦 {date} {weekday}"
+    section_title = f"P {date} {weekday}"
     new_content = f"\n## {section_title}\n\n| 브랜드 / 건명 | 수량 | 도착시간 | 오더번호 |\n|---|---|---|---|\n|{parsed['brand']}|{parsed['quantity']}|{parsed['arrival_time']}|{parsed['order_number']}|\n"
 
     try:
-        slack_client.canvases_update(
+        slack_client.canvases_edit(
             canvas_id=CANVAS_ID,
             changes=[{
                 "operation": "insert_after",
