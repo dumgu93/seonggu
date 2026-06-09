@@ -1,0 +1,4 @@
+flask
+slack-sdk
+anthropic
+gunicorn
