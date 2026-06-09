@@ -3,6 +3,8 @@ import re
 from flask import Flask, request, jsonify
 from slack_sdk import WebClient
 from datetime import datetime
+import threading
+import time
 
 app = Flask(__name__)
 
@@ -16,17 +18,14 @@ processed_events = set()
 def parse_message(text):
     result = {}
 
-    # 멘션 제거
     clean_text = re.sub(r'<@[A-Z0-9]+\|[^>]+>', '', text)
     clean_text = re.sub(r'<!subteam\^[^>]+>', '', clean_text)
     clean_text = re.sub(r'<http[^>]+>', '', clean_text)
 
-    # 오더번호 추출
     order_pattern = r'26\d{4}_[A-Za-z가-힣]+_[A-Za-z가-힣0-9()]+(?:\([^)]+\))?'
     orders = re.findall(order_pattern, clean_text)
     result['order_number'] = ' / '.join(orders) if orders else '-'
 
-    # 날짜 추출 - 6/13 형식 우선
     date_str = None
     patterns = [
         (r'6/(\d{1,2})', 'slash6'),
@@ -46,12 +45,10 @@ def parse_message(text):
             break
     result['date'] = date_str
 
-    # 수량 추출
     qty_pattern = r'(\d{1,3}(?:,\d{3})*|\d+)\s*[Ee][Aa]'
     quantities = re.findall(qty_pattern, clean_text)
     result['quantity'] = '+'.join(quantities) + 'EA' if quantities else '-'
 
-    # 브랜드/건명 추출
     brand = '-'
     for pattern in [
         r'#\s*(베리시[^\n*@<(]+?)(?:\s*출고|$|\n)',
@@ -64,7 +61,6 @@ def parse_message(text):
             break
     result['brand'] = brand
 
-    # 도착시간 추출
     time_match = re.search(r'(?:오전|오후)\s*(\d{1,2}시(?:\s*\d{1,2}분)?)', clean_text)
     if time_match:
         result['arrival_time'] = time_match.group(0)
@@ -82,30 +78,93 @@ def get_weekday(date_str):
     except:
         return ""
 
-def post_to_calendar(parsed):
-    date = parsed.get('date')
-    if not date:
-        print("날짜 파싱 실패")
-        return
-
-    weekday = get_weekday(date)
-
-    message = f"""*📦 {date} {weekday} 출고 요청*
-
-*브랜드/건명:* {parsed['brand']}
-*수량:* {parsed['quantity']}
-*도착시간:* {parsed['arrival_time']}
-*오더번호:* {parsed['order_number']}
-"""
-
+def collect_and_sort():
+    print("오후 5시 정렬 시작!")
     try:
-        slack_client.chat_postMessage(
-            channel=CALENDAR_CHANNEL_ID,
-            text=message
+        # 출고오더 채널 메시지 읽기 (최근 200개)
+        result = slack_client.conversations_history(
+            channel=CHANNEL_ID,
+            limit=200
         )
-        print(f"캘린더 채널 포스팅 성공: {date}")
+        messages = result.get("messages", [])
+
+        # 파싱
+        parsed_list = []
+        for msg in messages:
+            text = msg.get("text", "")
+            if "출고" in text:
+                parsed = parse_message(text)
+                if parsed.get("date"):
+                    parsed_list.append(parsed)
+
+        if not parsed_list:
+            print("파싱된 메시지 없음")
+            return
+
+        # 날짜 + 도착시간 순 정렬
+        def sort_key(p):
+            date = p.get('date', '9999-99-99')
+            time_str = p.get('arrival_time', '')
+            hour = 99
+            match = re.search(r'(\d{1,2})시', time_str)
+            if match:
+                hour = int(match.group(1))
+                if '오후' in time_str and hour != 12:
+                    hour += 12
+            return (date, hour)
+
+        parsed_list.sort(key=sort_key)
+
+        # 캘린더 채널 기존 메시지 전부 삭제
+        cal_result = slack_client.conversations_history(
+            channel=CALENDAR_CHANNEL_ID,
+            limit=200
+        )
+        for msg in cal_result.get("messages", []):
+            try:
+                slack_client.chat_delete(
+                    channel=CALENDAR_CHANNEL_ID,
+                    ts=msg["ts"]
+                )
+            except Exception as e:
+                print(f"메시지 삭제 오류: {e}")
+
+        # 날짜별로 그룹핑해서 포스팅
+        from itertools import groupby
+        for date, group in groupby(parsed_list, key=lambda x: x['date']):
+            weekday = get_weekday(date)
+            items = list(group)
+
+            lines = [f"*📦 {date} {weekday}*"]
+            lines.append("```")
+            lines.append(f"{'브랜드/건명':<25} {'수량':<15} {'도착시간':<12} {'오더번호'}")
+            lines.append("-" * 80)
+            for item in items:
+                lines.append(f"{item['brand']:<25} {item['quantity']:<15} {item['arrival_time']:<12} {item['order_number']}")
+            lines.append("```")
+
+            slack_client.chat_postMessage(
+                channel=CALENDAR_CHANNEL_ID,
+                text="\n".join(lines)
+            )
+
+        print(f"정렬 완료! 총 {len(parsed_list)}건")
+
     except Exception as e:
-        print(f"포스팅 오류: {e}")
+        print(f"정렬 오류: {e}")
+
+def scheduler():
+    while True:
+        now = datetime.now()
+        # 한국시간 기준 오후 5시 = UTC 08:00
+        if now.hour == 8 and now.minute == 0:
+            collect_and_sort()
+            time.sleep(60)
+        time.sleep(30)
+
+# 스케줄러 백그라운드 실행
+scheduler_thread = threading.Thread(target=scheduler, daemon=True)
+scheduler_thread.start()
 
 @app.route("/slack/events", methods=["POST"])
 def slack_events():
@@ -129,9 +188,25 @@ def slack_events():
         if channel == CHANNEL_ID and "출고" in text:
             parsed = parse_message(text)
             print(f"파싱 결과: {parsed}")
-            post_to_calendar(parsed)
+            if parsed.get('date'):
+                # 바로 포스팅 (정렬은 오후 5시에)
+                weekday = get_weekday(parsed['date'])
+                message = f"*📦 {parsed['date']} {weekday}*\n*브랜드/건명:* {parsed['brand']}\n*수량:* {parsed['quantity']}\n*도착시간:* {parsed['arrival_time']}\n*오더번호:* {parsed['order_number']}"
+                try:
+                    slack_client.chat_postMessage(
+                        channel=CALENDAR_CHANNEL_ID,
+                        text=message
+                    )
+                    print("즉시 포스팅 성공")
+                except Exception as e:
+                    print(f"즉시 포스팅 오류: {e}")
 
     return "OK"
+
+@app.route("/trigger-sort", methods=["GET"])
+def trigger_sort():
+    collect_and_sort()
+    return "정렬 완료!"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 3000)))
