@@ -18,19 +18,24 @@ processed_events = set()
 def parse_message(text):
     result = {}
 
+    # 멘션 제거
     clean_text = re.sub(r'<@[A-Z0-9]+\|[^>]+>', '', text)
     clean_text = re.sub(r'<!subteam\^[^>]+>', '', clean_text)
     clean_text = re.sub(r'<http[^>]+>', '', clean_text)
 
+    # 오더번호 추출
     order_pattern = r'26\d{4}_[A-Za-z가-힣]+_[A-Za-z가-힣0-9()]+(?:\([^)]+\))?'
     orders = re.findall(order_pattern, clean_text)
     result['order_number'] = ' / '.join(orders) if orders else '-'
 
+    # 날짜 추출 - 다양한 형식 지원
     date_str = None
     patterns = [
-        (r'6/(\d{1,2})', 'slash6'),
-        (r'(\d{1,2})월\s*/?\s*(\d{1,2})', 'md'),
+        (r'6/(\d{1,2})일?', 'slash6'),
+        (r'6월\s*(\d{1,2})일?', 'month6'),
+        (r'(\d{1,2})월\s*(\d{1,2})일?', 'md'),
         (r'(\d{4})[.\-](\d{1,2})[.\-](\d{1,2})', 'ymd'),
+        (r'26\.(\d{2})\.(\d{2})', 'short'),
     ]
     for pattern, ptype in patterns:
         match = re.search(pattern, clean_text)
@@ -38,17 +43,23 @@ def parse_message(text):
             g = match.groups()
             if ptype == 'slash6':
                 date_str = f"2026-06-{g[0].zfill(2)}"
+            elif ptype == 'month6':
+                date_str = f"2026-06-{g[0].zfill(2)}"
             elif ptype == 'md':
                 date_str = f"2026-{g[0].zfill(2)}-{g[1].zfill(2)}"
             elif ptype == 'ymd':
                 date_str = f"{g[0]}-{g[1].zfill(2)}-{g[2].zfill(2)}"
+            elif ptype == 'short':
+                date_str = f"20{g[0]}-{g[1].zfill(2)}"
             break
     result['date'] = date_str
 
+    # 수량 추출
     qty_pattern = r'(\d{1,3}(?:,\d{3})*|\d+)\s*[Ee][Aa]'
     quantities = re.findall(qty_pattern, clean_text)
     result['quantity'] = '+'.join(quantities) + 'EA' if quantities else '-'
 
+    # 브랜드/건명 추출
     brand = '-'
     for pattern in [
         r'#\s*(베리시[^\n*@<(]+?)(?:\s*출고|$|\n)',
@@ -61,6 +72,7 @@ def parse_message(text):
             break
     result['brand'] = brand
 
+    # 도착시간 추출
     time_match = re.search(r'(?:오전|오후)\s*(\d{1,2}시(?:\s*\d{1,2}분)?)', clean_text)
     if time_match:
         result['arrival_time'] = time_match.group(0)
@@ -81,7 +93,7 @@ def get_weekday(date_str):
 def collect_and_sort():
     print("오후 5시 정렬 시작!")
     try:
-        # 출고오더 채널 메시지 읽기 (최근 200개)
+        # 출고오더 채널 메시지 읽기
         result = slack_client.conversations_history(
             channel=CHANNEL_ID,
             limit=200
@@ -156,7 +168,7 @@ def collect_and_sort():
 def scheduler():
     while True:
         now = datetime.now()
-        # 한국시간 기준 오후 5시 = UTC 08:00
+        # 한국시간 오후 5시 = UTC 08:00
         if now.hour == 8 and now.minute == 0:
             collect_and_sort()
             time.sleep(60)
@@ -189,7 +201,6 @@ def slack_events():
             parsed = parse_message(text)
             print(f"파싱 결과: {parsed}")
             if parsed.get('date'):
-                # 바로 포스팅 (정렬은 오후 5시에)
                 weekday = get_weekday(parsed['date'])
                 message = f"*📦 {parsed['date']} {weekday}*\n*브랜드/건명:* {parsed['brand']}\n*수량:* {parsed['quantity']}\n*도착시간:* {parsed['arrival_time']}\n*오더번호:* {parsed['order_number']}"
                 try:
