@@ -79,23 +79,32 @@ def update_canvas(parsed):
 
     weekday = get_weekday(date)
     section_title = f"P {date} {weekday}"
-    new_content = f"\n## {section_title}\n\n| 브랜드 / 건명 | 수량 | 도착시간 | 오더번호 |\n|---|---|---|---|\n|{parsed['brand']}|{parsed['quantity']}|{parsed['arrival_time']}|{parsed['order_number']}|\n"
+    new_content = f"## {section_title}\n\n| 브랜드 / 건명 | 수량 | 도착시간 | 오더번호 |\n|---|---|---|---|\n|{parsed['brand']}|{parsed['quantity']}|{parsed['arrival_time']}|{parsed['order_number']}|\n\n---\n"
 
     try:
-        slack_client.canvases_edit(
+        # Canvas 섹션 목록 가져오기
+        result = slack_client.canvases_sections_lookup(
             canvas_id=CANVAS_ID,
-            changes=[{
-                "operation": "insert_after",
-                "document_content": {
-                    "type": "markdown",
-                    "markdown": new_content
-                }
-            }]
+            criteria={"contains_text": "출고 캘린더"}
         )
+        sections = result.get("sections", [])
+        
+        if sections:
+            last_section_id = sections[-1]["id"]
+            slack_client.canvases_edit(
+                canvas_id=CANVAS_ID,
+                changes=[{
+                    "operation": "insert_after",
+                    "section_id": last_section_id,
+                    "document_content": {
+                        "type": "markdown",
+                        "markdown": new_content
+                    }
+                }]
+            )
         print(f"Canvas 업데이트 성공: {section_title}")
     except Exception as e:
         print(f"Canvas 업데이트 오류: {e}")
-
 @app.route("/slack/events", methods=["POST"])
 def slack_events():
     data = request.json
