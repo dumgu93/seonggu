@@ -1,9 +1,4 @@
-좋은 소식이에요! 로그 보면 Slack에서 이벤트가 서버로 잘 전달되고 있어요 (POST /slack/events 200 여러 번 찍힘 ✅)
-문제는 Canvas 업데이트 부분에서 오류가 나고 있는 것 같아요. 코드를 좀 더 자세히 확인해볼게요.
-
-GitHub에서 app.py 수정이 필요해요.
-👉 https://github.com/dumgu93/seonggu/blob/main/app.py 접속 → 연필 아이콘 클릭 → 기존 내용 전부 지우고 아래 코드로 교체해주세요:
-pythonimport os
+import os
 import re
 from flask import Flask, request, jsonify
 from slack_sdk import WebClient
