@@ -21,13 +21,13 @@ def clean(text):
     text = re.sub(r'<@[A-Z0-9]+>', '', text)
     text = re.sub(r'<!subteam\^[^>]+>', '', text)
     text = re.sub(r'<http[^>]+>', '', text)
-    # 이모지 제거 (그림 이모지 + 변형 선택자)
+    # 이모지 제거
     emoji_pattern = re.compile(
         "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF\U0000FE00-\U0000FE0F\U00002190-\U000021FF\U00002B00-\U00002BFF]+",
         flags=re.UNICODE
     )
     text = emoji_pattern.sub('', text)
-    # :emoji_code: 형식 제거
+    # :emoji_code: 제거
     text = re.sub(r':[a-z_]+:', '', text)
     # 대괄호 표시 제거 (예: [긴급])
     text = re.sub(r'\[[^\]]*\]', '', text)
@@ -177,6 +177,7 @@ def collect_and_sort():
 def scheduler():
     while True:
         now = datetime.now()
+        # 한국시간 오후 5시 = UTC 08:00
         if now.hour == 8 and now.minute == 0:
             collect_and_sort()
             time.sleep(60)
@@ -225,6 +226,10 @@ def slack_events():
 def trigger_sort():
     collect_and_sort()
     return "정렬 완료!"
+
+@app.route("/ping", methods=["GET"])
+def ping():
+    return "alive"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 3000)))
