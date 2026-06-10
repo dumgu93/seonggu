@@ -36,15 +36,13 @@ def clean(text):
 
 def extract_date(text):
     """출고일 라인을 우선 찾고, 거기서 날짜를 추출"""
-    # 1순위: '출고일' 또는 '도착일'이 있는 줄에서 날짜 찾기
     target_line = None
     for line in text.split('\n'):
-        if '출고일' in line or '도착일' in line or '출고 요청일' in line:
+        if '출고일' in line or '도착일' in line or '출고 요청일' in line or '출고요청일' in line:
             target_line = line
             break
     search_text = target_line if target_line else text
 
-    # 날짜 패턴들 (우선순위 순)
     patterns = [
         (r'26년\s*(\d{1,2})월\s*(\d{1,2})일', 'ymd_kr'),       # 26년6월16일
         (r'(\d{4})[.\-](\d{1,2})[.\-](\d{1,2})', 'ymd'),        # 2026-06-13
@@ -70,24 +68,33 @@ def extract_date(text):
     return None
 
 def extract_brand(text):
-    """첫 번째 # 라인에서 브랜드명 추출"""
+    """브랜드명 추출 - # 라인 우선, 없으면 '출고 요청' 문장에서"""
     brand = '-'
-    # # 으로 시작하는 첫 줄 찾기
+    # 1순위: # 으로 시작하는 줄
     for line in text.split('\n'):
-        line = line.strip().lstrip('*').strip()
-        if line.startswith('#'):
-            # # 제거
-            content = line.lstrip('#').strip()
-            # '출고 요청', '출고요청', '출고', '요청', '퀵', '6차' 등 뒤쪽 키워드 제거
+        line_s = line.strip().lstrip('*').strip()
+        if line_s.startswith('#'):
+            content = line_s.lstrip('#').strip()
             content = re.sub(r'\s*(퀵\s*)?출고\s*요청.*$', '', content)
             content = re.sub(r'\s*(퀵\s*)?출고.*$', '', content)
-            content = re.sub(r'\s*\d+월\s*\d+차.*$', '', content)  # '6월6차' 제거
-            content = re.sub(r'\s*\d+차.*$', '', content)           # '4차' 제거
+            content = re.sub(r'\s*\d+월\s*\d+차.*$', '', content)
+            content = re.sub(r'\s*\d+차.*$', '', content)
             content = re.sub(r'\s*퀵$', '', content)
             content = re.sub(r'\*', '', content)
             brand = content.strip()
-            break
-    return brand if brand else '-'
+            if brand:
+                return brand
+
+    # 2순위: '브랜드명 ... 출고 요청' 문장에서 추출 (# 없는 경우)
+    m = re.search(r'([가-힣A-Za-z0-9]+(?:\s[가-힣A-Za-z0-9]+){0,3})\s*(?:퀵\s*)?출고\s*요청', text)
+    if m:
+        cand = m.group(1).strip()
+        cand = re.sub(r'^(안녕하세요|안녕하십니까)\s*,?\s*', '', cand)
+        cand = cand.split(',')[-1].strip()
+        if cand:
+            return cand
+
+    return brand
 
 def parse_message(text):
     result = {}
