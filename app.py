@@ -16,26 +16,22 @@ slack_client = WebClient(token=SLACK_TOKEN)
 processed_events = set()
 
 def clean(text):
-    # 멘션/링크 제거
     text = re.sub(r'<@[A-Z0-9]+\|[^>]+>', '', text)
     text = re.sub(r'<@[A-Z0-9]+>', '', text)
     text = re.sub(r'<!subteam\^[^>]+>', '', text)
+    text = re.sub(r'<tel:[^>|]+\|([^>]+)>', r'\1', text)  # <tel:..|010-..> → 010-..
     text = re.sub(r'<tel:[^>]+>', '', text)
     text = re.sub(r'<http[^>]+>', '', text)
-    # 이모지 제거
     emoji_pattern = re.compile(
         "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF\U0000FE00-\U0000FE0F\U00002190-\U000021FF\U00002B00-\U00002BFF]+",
         flags=re.UNICODE
     )
     text = emoji_pattern.sub('', text)
-    # :emoji_code: 제거
     text = re.sub(r':[a-z_]+:', '', text)
-    # [긴급] 같은 대괄호 제거
     text = re.sub(r'\[[^\]]*\]', '', text)
     return text
 
 def extract_date(text):
-    """출고일 라인을 우선 찾고, 거기서 날짜를 추출"""
     target_line = None
     for line in text.split('\n'):
         if '출고일' in line or '도착일' in line or '출고 요청일' in line or '출고요청일' in line:
@@ -44,12 +40,12 @@ def extract_date(text):
     search_text = target_line if target_line else text
 
     patterns = [
-        (r'26년\s*(\d{1,2})월\s*(\d{1,2})일', 'ymd_kr'),       # 26년6월16일
-        (r'(\d{4})[.\-](\d{1,2})[.\-](\d{1,2})', 'ymd'),        # 2026-06-13
-        (r'26\.(\d{1,2})\.(\d{1,2})', 'short'),                 # 26.06.13
-        (r'(\d{1,2})\s*월\s*/?\s*(\d{1,2})\s*[일(]', 'md'),     # 6월13일, 6월/13(
-        (r'(\d{1,2})\s*월\s*/?\s*(\d{1,2})', 'md'),             # 6월13, 6월/13
-        (r'(\d{1,2})\s*/\s*(\d{1,2})\s*일?', 'slash'),           # 6/13, 6/13일
+        (r'26년\s*(\d{1,2})월\s*(\d{1,2})일', 'ymd_kr'),
+        (r'(\d{4})[.\-](\d{1,2})[.\-](\d{1,2})', 'ymd'),
+        (r'26\.(\d{1,2})\.(\d{1,2})', 'short'),
+        (r'(\d{1,2})\s*월\s*/?\s*(\d{1,2})\s*[일(]', 'md'),
+        (r'(\d{1,2})\s*월\s*/?\s*(\d{1,2})', 'md'),
+        (r'(\d{1,2})\s*/\s*(\d{1,2})\s*일?', 'slash'),
     ]
     for pattern, ptype in patterns:
         match = re.search(pattern, search_text)
@@ -68,9 +64,7 @@ def extract_date(text):
     return None
 
 def extract_brand(text):
-    """브랜드명 추출 - # 라인 우선, 없으면 '출고 요청' 문장에서"""
     brand = '-'
-    # 1순위: # 으로 시작하는 줄
     for line in text.split('\n'):
         line_s = line.strip().lstrip('*').strip()
         if line_s.startswith('#'):
@@ -85,7 +79,6 @@ def extract_brand(text):
             if brand:
                 return brand
 
-    # 2순위: '브랜드명 ... 출고 요청' 문장에서 추출 (# 없는 경우)
     m = re.search(r'([가-힣A-Za-z0-9]+(?:\s[가-힣A-Za-z0-9]+){0,3})\s*(?:퀵\s*)?출고\s*요청', text)
     if m:
         cand = m.group(1).strip()
@@ -96,27 +89,30 @@ def extract_brand(text):
 
     return brand
 
+def extract_driver(text):
+    """수령지 연락처 / 배차 기사 정보 추출 (전화번호 위주)"""
+    phones = re.findall(r'01[016789]-?\d{3,4}-?\d{4}', text)
+    if phones:
+        # 중복 제거, 최대 2개까지
+        uniq = []
+        for p in phones:
+            if p not in uniq:
+                uniq.append(p)
+        return ' / '.join(uniq[:2])
+    return '-'
+
 def parse_message(text):
     result = {}
     clean_text = clean(text)
 
-    # 오더번호
     order_pattern = r'26\d{4}_[A-Za-z가-힣]+_[A-Za-z가-힣0-9()]+(?:\([^)]+\))?'
     orders = re.findall(order_pattern, clean_text)
     result['order_number'] = ' / '.join(orders) if orders else '-'
 
-    # 날짜
     result['date'] = extract_date(clean_text)
-
-    # 수량
-    qty_pattern = r'(\d{1,3}(?:,\d{3})*|\d+)\s*[Ee][Aa]'
-    quantities = re.findall(qty_pattern, clean_text)
-    result['quantity'] = '+'.join(quantities) + 'EA' if quantities else '-'
-
-    # 브랜드
     result['brand'] = extract_brand(clean_text)
+    result['driver'] = extract_driver(clean_text)
 
-    # 도착시간
     time_match = re.search(r'(?:오전|오후)\s*(\d{1,2}시(?:\s*\d{1,2}분)?)', clean_text)
     if time_match:
         result['arrival_time'] = time_match.group(0)
@@ -148,6 +144,34 @@ def collect_and_sort():
                 if parsed.get("date"):
                     parsed_list.append(parsed)
 
+            # 스레드 댓글 처리 (기사 정보 보강 + 댓글 내 출고건)
+            if msg.get("reply_count", 0) > 0:
+                try:
+                    replies = slack_client.conversations_replies(
+                        channel=CHANNEL_ID, ts=msg["ts"], limit=50
+                    )
+                    # 원본에서 driver가 '-'면 댓글에서 전화번호 보강
+                    reply_texts = []
+                    for reply in replies.get("messages", []):
+                        if reply.get("ts") == msg["ts"]:
+                            continue
+                        r_text = reply.get("text", "")
+                        reply_texts.append(r_text)
+                        # 댓글에 출고건이 따로 있으면 추가
+                        if "출고" in r_text and ("출고일" in r_text or "출고오더" in r_text):
+                            r_parsed = parse_message(r_text)
+                            if r_parsed.get("date"):
+                                parsed_list.append(r_parsed)
+
+                    # 원본 건의 driver가 비어있으면 댓글 전화번호로 보강
+                    if parsed_list and "출고" in text:
+                        joined = "\n".join(reply_texts)
+                        d = extract_driver(clean(joined))
+                        if d != '-' and parsed_list[-1].get('driver', '-') == '-':
+                            parsed_list[-1]['driver'] = d
+                except Exception as e:
+                    print(f"스레드 읽기 오류: {e}")
+
         if not parsed_list:
             print("파싱된 메시지 없음")
             return
@@ -177,10 +201,10 @@ def collect_and_sort():
             weekday = get_weekday(date)
             items = list(group)
             lines = [f"*📦 {date} {weekday}*", "```"]
-            lines.append(f"{'브랜드/건명':<25} {'수량':<15} {'도착시간':<12} {'오더번호'}")
-            lines.append("-" * 80)
+            lines.append(f"{'브랜드/건명':<22} {'도착시간':<12} {'오더번호':<28} {'기사정보'}")
+            lines.append("-" * 90)
             for item in items:
-                lines.append(f"{item['brand']:<25} {item['quantity']:<15} {item['arrival_time']:<12} {item['order_number']}")
+                lines.append(f"{item['brand']:<22} {item['arrival_time']:<12} {item['order_number']:<28} {item.get('driver','-')}")
             lines.append("```")
             slack_client.chat_postMessage(channel=CALENDAR_CHANNEL_ID, text="\n".join(lines))
 
@@ -220,7 +244,7 @@ def slack_events():
             print(f"파싱 결과: {parsed}")
             if parsed.get('date'):
                 weekday = get_weekday(parsed['date'])
-                message = f"*📦 {parsed['date']} {weekday}*\n*브랜드/건명:* {parsed['brand']}\n*수량:* {parsed['quantity']}\n*도착시간:* {parsed['arrival_time']}\n*오더번호:* {parsed['order_number']}"
+                message = f"*📦 {parsed['date']} {weekday}*\n*브랜드/건명:* {parsed['brand']}\n*도착시간:* {parsed['arrival_time']}\n*오더번호:* {parsed['order_number']}\n*기사정보:* {parsed.get('driver','-')}"
                 try:
                     slack_client.chat_postMessage(channel=CALENDAR_CHANNEL_ID, text=message)
                     print("즉시 포스팅 성공")
