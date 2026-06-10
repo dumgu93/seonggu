@@ -254,8 +254,10 @@ def slack_events():
 
 @app.route("/trigger-sort", methods=["GET"])
 def trigger_sort():
-    collect_and_sort()
-    return "정렬 완료!"
+    # 백그라운드로 실행 (타임아웃 방지)
+    t = threading.Thread(target=collect_and_sort, daemon=True)
+    t.start()
+    return "정렬 시작! 1~2분 후 캘린더 채널을 확인해주세요."
 
 @app.route("/ping", methods=["GET"])
 def ping():
