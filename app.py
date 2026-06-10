@@ -19,7 +19,7 @@ def clean(text):
     text = re.sub(r'<@[A-Z0-9]+\|[^>]+>', '', text)
     text = re.sub(r'<@[A-Z0-9]+>', '', text)
     text = re.sub(r'<!subteam\^[^>]+>', '', text)
-    text = re.sub(r'<tel:[^>|]+\|([^>]+)>', r'\1', text)  # <tel:..|010-..> → 010-..
+    text = re.sub(r'<tel:[^>|]+\|([^>]+)>', r'\1', text)
     text = re.sub(r'<tel:[^>]+>', '', text)
     text = re.sub(r'<http[^>]+>', '', text)
     emoji_pattern = re.compile(
@@ -89,17 +89,21 @@ def extract_brand(text):
 
     return brand
 
-def extract_driver(text):
-    """수령지 연락처 / 배차 기사 정보 추출 (전화번호 위주)"""
-    phones = re.findall(r'01[016789]-?\d{3,4}-?\d{4}', text)
-    if phones:
-        # 중복 제거, 최대 2개까지
-        uniq = []
-        for p in phones:
-            if p not in uniq:
-                uniq.append(p)
-        return ' / '.join(uniq[:2])
-    return '-'
+def extract_driver_from_reply(text):
+    """'차량정보 전달드립니다' 다음 3줄(이름/연락처/차량번호) 추출"""
+    lines = [l.strip() for l in text.split('\n')]
+    for i, line in enumerate(lines):
+        if '차량정보' in line:
+            # 차량정보 줄 다음부터 빈 줄 제외하고 최대 3개 수집
+            info = []
+            for nxt in lines[i+1:]:
+                if nxt:
+                    info.append(nxt)
+                if len(info) >= 3:
+                    break
+            if info:
+                return ' / '.join(info)
+    return None
 
 def parse_message(text):
     result = {}
@@ -111,7 +115,7 @@ def parse_message(text):
 
     result['date'] = extract_date(clean_text)
     result['brand'] = extract_brand(clean_text)
-    result['driver'] = extract_driver(clean_text)
+    result['driver'] = '-'
 
     time_match = re.search(r'(?:오전|오후)\s*(\d{1,2}시(?:\s*\d{1,2}분)?)', clean_text)
     if time_match:
@@ -131,7 +135,7 @@ def get_weekday(date_str):
         return ""
 
 def collect_and_sort():
-    print("오후 5시 정렬 시작!")
+    print("정렬 시작!")
     try:
         result = slack_client.conversations_history(channel=CHANNEL_ID, limit=200)
         messages = result.get("messages", [])
@@ -139,38 +143,30 @@ def collect_and_sort():
         parsed_list = []
         for msg in messages:
             text = msg.get("text", "")
-            if "출고" in text:
-                parsed = parse_message(text)
-                if parsed.get("date"):
-                    parsed_list.append(parsed)
+            if "출고" not in text:
+                continue
+            parsed = parse_message(text)
+            if not parsed.get("date"):
+                continue
 
-            # 스레드 댓글 처리 (기사 정보 보강 + 댓글 내 출고건)
+            # 스레드 댓글에서 차량정보 찾기
             if msg.get("reply_count", 0) > 0:
                 try:
                     replies = slack_client.conversations_replies(
                         channel=CHANNEL_ID, ts=msg["ts"], limit=50
                     )
-                    # 원본에서 driver가 '-'면 댓글에서 전화번호 보강
-                    reply_texts = []
                     for reply in replies.get("messages", []):
                         if reply.get("ts") == msg["ts"]:
                             continue
-                        r_text = reply.get("text", "")
-                        reply_texts.append(r_text)
-                        # 댓글에 출고건이 따로 있으면 추가
-                        if "출고" in r_text and ("출고일" in r_text or "출고오더" in r_text):
-                            r_parsed = parse_message(r_text)
-                            if r_parsed.get("date"):
-                                parsed_list.append(r_parsed)
-
-                    # 원본 건의 driver가 비어있으면 댓글 전화번호로 보강
-                    if parsed_list and "출고" in text:
-                        joined = "\n".join(reply_texts)
-                        d = extract_driver(clean(joined))
-                        if d != '-' and parsed_list[-1].get('driver', '-') == '-':
-                            parsed_list[-1]['driver'] = d
+                        r_text = clean(reply.get("text", ""))
+                        driver = extract_driver_from_reply(r_text)
+                        if driver:
+                            parsed['driver'] = driver
+                            break
                 except Exception as e:
                     print(f"스레드 읽기 오류: {e}")
+
+            parsed_list.append(parsed)
 
         if not parsed_list:
             print("파싱된 메시지 없음")
@@ -201,10 +197,10 @@ def collect_and_sort():
             weekday = get_weekday(date)
             items = list(group)
             lines = [f"*📦 {date} {weekday}*", "```"]
-            lines.append(f"{'브랜드/건명':<22} {'도착시간':<12} {'오더번호':<28} {'기사정보'}")
-            lines.append("-" * 90)
+            lines.append(f"{'브랜드/건명':<20} {'도착시간':<10} {'오더번호':<26} {'기사정보'}")
+            lines.append("-" * 95)
             for item in items:
-                lines.append(f"{item['brand']:<22} {item['arrival_time']:<12} {item['order_number']:<28} {item.get('driver','-')}")
+                lines.append(f"{item['brand']:<20} {item['arrival_time']:<10} {item['order_number']:<26} {item.get('driver','-')}")
             lines.append("```")
             slack_client.chat_postMessage(channel=CALENDAR_CHANNEL_ID, text="\n".join(lines))
 
@@ -254,7 +250,6 @@ def slack_events():
 
 @app.route("/trigger-sort", methods=["GET"])
 def trigger_sort():
-    # 백그라운드로 실행 (타임아웃 방지)
     t = threading.Thread(target=collect_and_sort, daemon=True)
     t.start()
     return "정렬 시작! 1~2분 후 캘린더 채널을 확인해주세요."
