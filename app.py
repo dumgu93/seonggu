@@ -42,36 +42,42 @@ def get_worksheet():
     return sh.worksheet(os.environ.get("SHEET_NAME", "사고접수"))
 
 
+def normalize(text):
+    """별표(굵게), 목록기호(1. •) 등 슬랙 서식 제거"""
+    text = text.replace("*", "")
+    lines = []
+    for line in text.split("\n"):
+        line = re.sub(r"^\s*(?:\d+[.)]|[•◦▪-])\s*", "", line)
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def extract_field(text, field_name):
     """'주문번호: xxx' / '송장번호: xxx' / '요청내용: xxx' 형태에서 값 추출"""
     m = re.search(rf"{field_name}\s*[:：]\s*([^\n]*)", text)
     if not m:
         return ""
     value = m.group(1).strip()
-    # 번호 필드는 숫자/영문/하이픈만 남기고 정리
     if "번호" in field_name:
         value = re.sub(r"[^A-Za-z0-9\-]", "", value)
     return value
 
 
 def handle_accident_message(event):
-    """새 접수 글 → 시트에 행 추가"""
+    """새 접수 글 → 시트에 행 추가 (열 밀림 방지: 항상 9열 고정)"""
     raw = event.get("text", "")
-    # 줄 구조 보존을 위해 clean 전에 줄바꿈 유지
-    text = clean(raw)
+    text = normalize(clean(raw))
     ts = event.get("ts")
 
     flat = re.sub(r"\s+", " ", text).strip()
     if not flat and not event.get("files"):
         return
 
-    order_no = extract_field(text, "주문번호")
-    invoice_no = extract_field(text, "송장번호")
-    req_content = extract_field(text, "요청내용")
+    order_no = extract_field(text, "주문번호") or ""
+    invoice_no = extract_field(text, "송장번호") or ""
+    req_content = extract_field(text, "요청내용") or ""
 
-    # 요청내용 항목이 없으면(구양식 등) 메시지 전체를 내용으로
     if req_content:
-        # 첫 줄의 #타이틀이 있으면 앞에 붙여줌
         title_m = re.search(r"#\s*([^\n]+)", text)
         if title_m:
             req_content = f"[{title_m.group(1).strip()}] {req_content}"
@@ -84,12 +90,22 @@ def handle_accident_message(event):
     req_date = datetime.fromtimestamp(float(ts), KST).strftime("%Y-%m-%d")
 
     # A요청일 B주문번호 C송장번호 D내용 E완료여부 F담당자 G완료일 H비고 I메시지ID
-    row = [req_date, order_no, invoice_no, req_content[:500],
-           "미진행", "심햇님,오태완", "", "", "'" + str(ts)]
+    row = [
+        str(req_date),
+        str(order_no),
+        str(invoice_no),
+        str(req_content)[:500],
+        "미진행",
+        "심햇님,오태완",
+        "",
+        "",
+        "'" + str(ts),
+    ]
     try:
         ws = get_worksheet()
-        ws.append_row(row, value_input_option="USER_ENTERED")
-        print(f"시트 행 추가 완료: {order_no}/{invoice_no} {req_content[:30]}")
+        ws.append_row(row, value_input_option="USER_ENTERED",
+                      table_range="A1")
+        print(f"시트 행 추가 완료: [{order_no}] [{invoice_no}] {req_content[:30]}")
     except Exception as e:
         print(f"시트 행 추가 오류: {e}")
 
@@ -105,7 +121,6 @@ def handle_accident_reply(event):
         ws = get_worksheet()
         id_column = ws.col_values(9)  # I열(메시지ID)
 
-        # 초 단위(소수점 앞부분)만 비교해서 행 찾기
         target = str(thread_ts).split(".")[0]
         row = None
         for i, val in enumerate(id_column):
@@ -122,7 +137,7 @@ def handle_accident_reply(event):
         if user in MANAGERS:
             ws.update_cell(row, 6, MANAGERS[user])
 
-        # 완료여부(E열=5)/완료일(G열=7) — 띄어쓰기 무시하고 판정
+        # 완료여부(E열=5)/완료일(G열=7)
         norm = text.replace(" ", "")
         if "확인완료" in norm:
             done_date = datetime.fromtimestamp(float(reply_ts), KST).strftime("%Y-%m-%d")
