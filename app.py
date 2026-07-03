@@ -48,7 +48,12 @@ def handle_accident_message(event):
 
     content = re.sub(r"\s+", " ", text).strip()
     if not content:
-        return
+        if event.get("files"):
+            content = "(파일/이미지 첨부)"
+        else:
+            return
+    elif event.get("files"):
+        content += " [첨부있음]"
 
     req_date = datetime.fromtimestamp(float(ts), KST).strftime("%Y-%m-%d")
 
@@ -314,6 +319,8 @@ scheduler_thread.start()
 # ==========================================================
 # Slack Events (두 채널 공용)
 # ==========================================================
+ALLOWED_SUBTYPES = (None, "thread_broadcast", "file_share")
+
 @app.route("/slack/events", methods=["POST"])
 def slack_events():
     data = request.json
@@ -326,7 +333,7 @@ def slack_events():
         return "OK"
     processed_events.add(event_id)
 
-    if event.get("type") == "message" and event.get("subtype") in (None, "thread_broadcast") and not event.get("bot_id"):
+    if event.get("type") == "message" and event.get("subtype") in ALLOWED_SUBTYPES and not event.get("bot_id"):
         channel = event.get("channel")
         text = event.get("text", "")
         print(f"메시지 수신: channel={channel}, text={text[:80]}")
