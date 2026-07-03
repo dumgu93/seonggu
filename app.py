@@ -21,7 +21,8 @@ processed_events = set()
 
 # ==========================================================
 # [신규] 사고접수 → Google Sheets 자동 기록
-# 시트 열: A요청일 B타이틀/요청내용 C완료여부 D담당자 E완료일 F비고 G메시지ID
+# 시트 열: A요청일 B주문번호 C송장번호 D타이틀/요청내용 E완료여부
+#          F담당자 G완료일 H비고 I메시지ID
 # ==========================================================
 KST = timezone(timedelta(hours=9))
 
@@ -41,28 +42,54 @@ def get_worksheet():
     return sh.worksheet(os.environ.get("SHEET_NAME", "사고접수"))
 
 
+def extract_field(text, field_name):
+    """'주문번호: xxx' / '송장번호: xxx' / '요청내용: xxx' 형태에서 값 추출"""
+    m = re.search(rf"{field_name}\s*[:：]\s*([^\n]*)", text)
+    if not m:
+        return ""
+    value = m.group(1).strip()
+    # 번호 필드는 숫자/영문/하이픈만 남기고 정리
+    if "번호" in field_name:
+        value = re.sub(r"[^A-Za-z0-9\-]", "", value)
+    return value
+
+
 def handle_accident_message(event):
     """새 접수 글 → 시트에 행 추가"""
-    text = clean(event.get("text", ""))
+    raw = event.get("text", "")
+    # 줄 구조 보존을 위해 clean 전에 줄바꿈 유지
+    text = clean(raw)
     ts = event.get("ts")
 
-    content = re.sub(r"\s+", " ", text).strip()
-    if not content:
-        if event.get("files"):
-            content = "(파일/이미지 첨부)"
-        else:
-            return
-    elif event.get("files"):
-        content += " [첨부있음]"
+    flat = re.sub(r"\s+", " ", text).strip()
+    if not flat and not event.get("files"):
+        return
+
+    order_no = extract_field(text, "주문번호")
+    invoice_no = extract_field(text, "송장번호")
+    req_content = extract_field(text, "요청내용")
+
+    # 요청내용 항목이 없으면(구양식 등) 메시지 전체를 내용으로
+    if req_content:
+        # 첫 줄의 #타이틀이 있으면 앞에 붙여줌
+        title_m = re.search(r"#\s*([^\n]+)", text)
+        if title_m:
+            req_content = f"[{title_m.group(1).strip()}] {req_content}"
+    else:
+        req_content = flat
+
+    if event.get("files"):
+        req_content = (req_content + " [첨부있음]").strip() if req_content else "(파일/이미지 첨부)"
 
     req_date = datetime.fromtimestamp(float(ts), KST).strftime("%Y-%m-%d")
 
-    # A요청일 B내용 C완료여부 D담당자 E완료일 F비고 G메시지ID
-    row = [req_date, content[:500], "미진행", "심햇님,오태완", "", "", "'" + str(ts)]
+    # A요청일 B주문번호 C송장번호 D내용 E완료여부 F담당자 G완료일 H비고 I메시지ID
+    row = [req_date, order_no, invoice_no, req_content[:500],
+           "미진행", "심햇님,오태완", "", "", "'" + str(ts)]
     try:
         ws = get_worksheet()
         ws.append_row(row, value_input_option="USER_ENTERED")
-        print(f"시트 행 추가 완료: {content[:40]}")
+        print(f"시트 행 추가 완료: {order_no}/{invoice_no} {req_content[:30]}")
     except Exception as e:
         print(f"시트 행 추가 오류: {e}")
 
@@ -76,7 +103,7 @@ def handle_accident_reply(event):
 
     try:
         ws = get_worksheet()
-        id_column = ws.col_values(7)  # G열(메시지ID)
+        id_column = ws.col_values(9)  # I열(메시지ID)
 
         # 초 단위(소수점 앞부분)만 비교해서 행 찾기
         target = str(thread_ts).split(".")[0]
@@ -91,21 +118,21 @@ def handle_accident_reply(event):
             print(f"원글을 시트에서 못 찾음: {thread_ts}")
             return
 
-        # 담당자 자동 지정
+        # 담당자 자동 지정 (F열=6)
         if user in MANAGERS:
-            ws.update_cell(row, 4, MANAGERS[user])
+            ws.update_cell(row, 6, MANAGERS[user])
 
-        # 완료여부/완료일 (띄어쓰기 무시하고 판정)
+        # 완료여부(E열=5)/완료일(G열=7) — 띄어쓰기 무시하고 판정
         norm = text.replace(" ", "")
         if "확인완료" in norm:
             done_date = datetime.fromtimestamp(float(reply_ts), KST).strftime("%Y-%m-%d")
-            ws.update_cell(row, 3, "완료")
-            ws.update_cell(row, 5, done_date)
+            ws.update_cell(row, 5, "완료")
+            ws.update_cell(row, 7, done_date)
             print(f"{row}행 완료 처리")
         elif "확인후답변" in norm:
-            current = ws.cell(row, 3).value
+            current = ws.cell(row, 5).value
             if current != "완료":
-                ws.update_cell(row, 3, "확인중")
+                ws.update_cell(row, 5, "확인중")
                 print(f"{row}행 확인중 처리")
     except Exception as e:
         print(f"시트 업데이트 오류: {e}")
