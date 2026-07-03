@@ -53,7 +53,7 @@ def handle_accident_message(event):
     req_date = datetime.fromtimestamp(float(ts), KST).strftime("%Y-%m-%d")
 
     # A요청일 B내용 C완료여부 D담당자 E완료일 F비고 G메시지ID
-    row = [req_date, content[:500], "미진행", "심햇님,오태완", "", "", "'" + ts]
+    row = [req_date, content[:500], "미진행", "심햇님,오태완", "", "", "'" + str(ts)]
     try:
         ws = get_worksheet()
         ws.append_row(row, value_input_option="USER_ENTERED")
@@ -72,10 +72,19 @@ def handle_accident_reply(event):
     try:
         ws = get_worksheet()
         id_column = ws.col_values(7)  # G열(메시지ID)
-        if thread_ts not in id_column:
+
+        # 초 단위(소수점 앞부분)만 비교해서 행 찾기
+        target = str(thread_ts).split(".")[0]
+        row = None
+        for i, val in enumerate(id_column):
+            v = str(val).replace("'", "").strip()
+            if v.split(".")[0] == target:
+                row = i + 1
+                break
+
+        if not row:
             print(f"원글을 시트에서 못 찾음: {thread_ts}")
             return
-        row = id_column.index(thread_ts) + 1
 
         # 담당자 자동 지정
         if user in MANAGERS:
