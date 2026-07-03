@@ -1,20 +1,105 @@
 import os
 import re
+import json
 from flask import Flask, request, jsonify
 from slack_sdk import WebClient
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import threading
 import time
+import gspread
+from google.oauth2.service_account import Credentials
 
 app = Flask(__name__)
 
 SLACK_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
 CALENDAR_CHANNEL_ID = "C0B92726KKM"
+ACCIDENT_CHANNEL_ID = "C0AGWG4QALV"  # 4-사고접수 (이름 바뀌어도 ID는 유지됨)
 
 slack_client = WebClient(token=SLACK_TOKEN)
 processed_events = set()
 
+# ==========================================================
+# [신규] 사고접수 → Google Sheets 자동 기록
+# 시트 열: A요청일 B타이틀/요청내용 C완료여부 D담당자 E완료일 F비고 G메시지ID
+# ==========================================================
+KST = timezone(timedelta(hours=9))
+
+MANAGERS = {
+    "U0AHCLVUW3T": "심햇님",
+    "U0B4CRHTSJZ": "오태완",
+}
+
+def get_worksheet():
+    creds_info = json.loads(os.environ["GOOGLE_CREDENTIALS_JSON"])
+    creds = Credentials.from_service_account_info(
+        creds_info,
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    )
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_key(os.environ["SPREADSHEET_ID"])
+    return sh.worksheet(os.environ.get("SHEET_NAME", "사고접수"))
+
+
+def handle_accident_message(event):
+    """새 접수 글 → 시트에 행 추가"""
+    text = clean(event.get("text", ""))
+    ts = event.get("ts")
+
+    content = re.sub(r"\s+", " ", text).strip()
+    if not content:
+        return
+
+    req_date = datetime.fromtimestamp(float(ts), KST).strftime("%Y-%m-%d")
+
+    # A요청일 B내용 C완료여부 D담당자 E완료일 F비고 G메시지ID
+    row = [req_date, content[:500], "미진행", "심햇님,오태완", "", "", ts]
+    try:
+        ws = get_worksheet()
+        ws.append_row(row, value_input_option="USER_ENTERED")
+        print(f"시트 행 추가 완료: {content[:40]}")
+    except Exception as e:
+        print(f"시트 행 추가 오류: {e}")
+
+
+def handle_accident_reply(event):
+    """스레드 댓글 → 담당자/완료여부/완료일 업데이트"""
+    thread_ts = event.get("thread_ts")
+    text = clean(event.get("text", ""))
+    user = event.get("user", "")
+    reply_ts = event.get("ts")
+
+    try:
+        ws = get_worksheet()
+        id_column = ws.col_values(7)  # G열(메시지ID)
+        if thread_ts not in id_column:
+            print(f"원글을 시트에서 못 찾음: {thread_ts}")
+            return
+        row = id_column.index(thread_ts) + 1
+
+        # 담당자 자동 지정
+        if user in MANAGERS:
+            ws.update_cell(row, 4, MANAGERS[user])
+
+        # 완료여부/완료일 (띄어쓰기 무시하고 판정)
+        norm = text.replace(" ", "")
+        if "확인완료" in norm:
+            done_date = datetime.fromtimestamp(float(reply_ts), KST).strftime("%Y-%m-%d")
+            ws.update_cell(row, 3, "완료")
+            ws.update_cell(row, 5, done_date)
+            print(f"{row}행 완료 처리")
+        elif "확인후답변" in norm:
+            current = ws.cell(row, 3).value
+            if current != "완료":
+                ws.update_cell(row, 3, "확인중")
+                print(f"{row}행 확인중 처리")
+    except Exception as e:
+        print(f"시트 업데이트 오류: {e}")
+
+
+# ==========================================================
+# [기존] 출고오더 캘린더 봇
+# ==========================================================
 def clean(text):
     text = re.sub(r'<@[A-Z0-9]+\|[^>]+>', '', text)
     text = re.sub(r'<@[A-Z0-9]+>', '', text)
@@ -94,7 +179,6 @@ def extract_driver_from_reply(text):
     lines = [l.strip() for l in text.split('\n')]
     for i, line in enumerate(lines):
         if '차량정보' in line:
-            # 차량정보 줄 다음부터 빈 줄 제외하고 최대 3개 수집
             info = []
             for nxt in lines[i+1:]:
                 if nxt:
@@ -149,7 +233,6 @@ def collect_and_sort():
             if not parsed.get("date"):
                 continue
 
-            # 스레드 댓글에서 차량정보 찾기
             if msg.get("reply_count", 0) > 0:
                 try:
                     replies = slack_client.conversations_replies(
@@ -219,6 +302,9 @@ def scheduler():
 scheduler_thread = threading.Thread(target=scheduler, daemon=True)
 scheduler_thread.start()
 
+# ==========================================================
+# Slack Events (두 채널 공용)
+# ==========================================================
 @app.route("/slack/events", methods=["POST"])
 def slack_events():
     data = request.json
@@ -231,10 +317,12 @@ def slack_events():
         return "OK"
     processed_events.add(event_id)
 
-    if event.get("type") == "message" and not event.get("subtype"):
+    if event.get("type") == "message" and not event.get("subtype") and not event.get("bot_id"):
         channel = event.get("channel")
         text = event.get("text", "")
         print(f"메시지 수신: channel={channel}, text={text[:80]}")
+
+        # [기존] 출고오더 → 캘린더 채널
         if channel == CHANNEL_ID and "출고" in text:
             parsed = parse_message(text)
             print(f"파싱 결과: {parsed}")
@@ -246,6 +334,14 @@ def slack_events():
                     print("즉시 포스팅 성공")
                 except Exception as e:
                     print(f"즉시 포스팅 오류: {e}")
+
+        # [신규] 사고접수 채널
+        if channel == ACCIDENT_CHANNEL_ID:
+            if event.get("thread_ts") and event.get("thread_ts") != event.get("ts"):
+                handle_accident_reply(event)    # 스레드 댓글 → 상태 업데이트
+            else:
+                handle_accident_message(event)  # 새 접수 글 → 행 추가
+
     return "OK"
 
 @app.route("/trigger-sort", methods=["GET"])
