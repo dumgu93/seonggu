@@ -2,3 +2,5 @@ flask
 slack-sdk
 anthropic
 gunicorn
+gspread
+google-auth
