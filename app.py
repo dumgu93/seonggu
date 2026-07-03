@@ -53,7 +53,7 @@ def handle_accident_message(event):
     req_date = datetime.fromtimestamp(float(ts), KST).strftime("%Y-%m-%d")
 
     # A요청일 B내용 C완료여부 D담당자 E완료일 F비고 G메시지ID
-    row = [req_date, content[:500], "미진행", "심햇님,오태완", "", "", ts]
+    row = [req_date, content[:500], "미진행", "심햇님,오태완", "", "", "'" + ts]
     try:
         ws = get_worksheet()
         ws.append_row(row, value_input_option="USER_ENTERED")
@@ -317,7 +317,7 @@ def slack_events():
         return "OK"
     processed_events.add(event_id)
 
-    if event.get("type") == "message" and not event.get("subtype") and not event.get("bot_id"):
+    if event.get("type") == "message" and event.get("subtype") in (None, "thread_broadcast") and not event.get("bot_id"):
         channel = event.get("channel")
         text = event.get("text", "")
         print(f"메시지 수신: channel={channel}, text={text[:80]}")
