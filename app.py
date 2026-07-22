@@ -31,6 +31,15 @@ MANAGERS = {
     "U0B4CRHTSJZ": "오태완",
 }
 
+# ----- 스레드 댓글 상태 판정 키워드 (반드시 '띄어쓰기 없이' 작성할 것) -----
+# 댓글 텍스트에서 공백을 모두 제거한 뒤 비교하므로,
+# "확인 완료" / "확인완료" / "확인  완료" 모두 동일하게 잡힙니다.
+DONE_WORDS = ("확인완료", "확인되었", "확인됐", "확인했습니다", "확인하였습니다")
+CHECKING_WORDS = ("확인후답변", "확인후회신")
+# 질문형 오탐 방지 ("확인되었는지 알려주세요" 같은 댓글이 완료로 잡히지 않도록)
+EXCLUDE_WORDS = ("확인되었는지", "확인됐는지", "확인되었나")
+
+
 def get_worksheet():
     creds_info = json.loads(os.environ["GOOGLE_CREDENTIALS_JSON"])
     creds = Credentials.from_service_account_info(
@@ -139,12 +148,16 @@ def handle_accident_reply(event):
 
         # 완료여부(E열=5)/완료일(G열=7)
         norm = text.replace(" ", "")
-        if "확인완료" in norm:
+
+        is_done = any(w in norm for w in DONE_WORDS) and not any(w in norm for w in EXCLUDE_WORDS)
+        is_checking = any(w in norm for w in CHECKING_WORDS)
+
+        if is_done:
             done_date = datetime.fromtimestamp(float(reply_ts), KST).strftime("%Y-%m-%d")
             ws.update_cell(row, 5, "완료")
             ws.update_cell(row, 7, done_date)
             print(f"{row}행 완료 처리")
-        elif "확인후답변" in norm:
+        elif is_checking:
             current = ws.cell(row, 5).value
             if current != "완료":
                 ws.update_cell(row, 5, "확인중")
